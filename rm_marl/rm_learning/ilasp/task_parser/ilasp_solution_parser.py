@@ -1,6 +1,8 @@
-from ....reward_machine import RewardMachine
-from ..ilasp_common import N_TRANSITION_STR, CONNECTED_STR
-from ..task_parser.ilasp_parser_utils import parse_edge_rule, parse_negative_transition_rule
+import sys, os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
+from rm_marl.reward_machine import RewardMachine
+from rm_marl.rm_learning.ilasp.ilasp_common import N_TRANSITION_STR, CONNECTED_STR
+from rm_marl.rm_learning.ilasp.task_parser.ilasp_parser_utils import parse_edge_rule, parse_negative_transition_rule
 
 
 def parse_ilasp_solutions(ilasp_learnt_filename):
@@ -30,8 +32,3 @@ def parse_ilasp_solutions(ilasp_learnt_filename):
             rm.add_transition(from_state, to_state, tuple(edges[edge]))
 
         return rm
-
-
-
-
-
