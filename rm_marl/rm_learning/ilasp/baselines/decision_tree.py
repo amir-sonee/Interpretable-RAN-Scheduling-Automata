@@ -1,0 +1,303 @@
+import argparse
+import json
+import os
+import time
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.tree import DecisionTreeClassifier, plot_tree, export_text
+from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score, ConfusionMatrixDisplay
+
+# --------------------------------------------------
+# Utilities
+# --------------------------------------------------
+
+def get_argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("task_config", help="json file containing training examples")
+    parser.add_argument("test_config", help="json file containing test examples")
+    return parser
+
+def load_dataset(filename):
+    with open(filename, "r") as f:
+        return json.load(f)
+
+def encode_dataset(data_dict):
+    # Same padding/encoding strategy as the transformer pipeline: every trace is
+    # padded/truncated to max_timesteps so traces of different original lengths
+    # end up with a fixed-size representation. For the trees we then flatten
+    # the (timesteps, features) grid into a single feature vector.
+    X, y = [], []
+    for label in target_labels:
+        traces = data_dict.get(label, [])
+        for trace in traces:
+            trace = trace[:max_timesteps]
+            while len(trace) < max_timesteps:
+                trace.append([])
+            encoded_trace = mlb.transform(trace)
+            X.append(encoded_trace.flatten())
+            y.append(label_map[label])
+    return np.array(X), np.array(y)
+
+def set_seed(seed):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+# --------------------------------------------------
+# Model
+# --------------------------------------------------
+
+def build_decision_tree_model(seed):
+    # Hyperparameters (tune as needed)
+    max_depth         = None   # None = grow until leaves are pure / min_samples_leaf reached
+    min_samples_split = 2
+    min_samples_leaf  = 1
+    criterion         = "gini"  # "gini" or "entropy"
+
+    model = DecisionTreeClassifier(
+        criterion=criterion,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        random_state=seed
+    )
+    return model
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+if __name__ == "__main__":
+
+    args = get_argparser().parse_args()
+
+    target_labels = ["goal_examples", "deadend_examples", "inc_examples"]
+    label_map     = {"goal_examples": 0, "deadend_examples": 1, "inc_examples": 2}
+    inv_label_map = {v: k for k, v in label_map.items()}
+    max_timesteps = 10
+
+    train_data = load_dataset(args.task_config)
+    test_data  = load_dataset(args.test_config)
+
+    all_requests = set()
+    for label in target_labels:
+        for trace in train_data.get(label, []):
+            for slot in trace:
+                all_requests.update(slot)
+
+    mlb = MultiLabelBinarizer(classes=sorted(all_requests))
+    mlb.fit([all_requests])
+
+    X_train, y_train = encode_dataset(train_data)
+    X_test,  y_test  = encode_dataset(test_data)
+
+    print(f"X_train shape: {X_train.shape}")
+    print(f"X_test shape:  {X_test.shape}")
+
+    os.makedirs("results", exist_ok=True)
+
+    NUM_RUNS = 30
+
+    test_accuracies_run  = np.zeros(NUM_RUNS)
+    train_accuracies_run = np.zeros(NUM_RUNS)
+
+    all_run_predictions = []
+    all_true_labels     = []
+    all_pred_labels     = []
+
+    run_times = []
+    overall_start = time.time()
+
+    for run in range(NUM_RUNS):
+        print(f"\n===== Run {run+1}/{NUM_RUNS} =====")
+        set_seed(run)
+        run_start = time.time()
+
+        model = build_decision_tree_model(seed=run)
+        model.fit(X_train, y_train)
+
+        train_acc = model.score(X_train, y_train)
+        test_acc  = model.score(X_test, y_test)
+        train_accuracies_run[run] = train_acc
+        test_accuracies_run[run]  = test_acc
+        print(f"train_acc={train_acc:.4f}  test_acc={test_acc:.4f}")
+
+        y_pred = model.predict(X_test)
+        all_run_predictions.append(y_pred)
+
+        all_true_labels.extend([inv_label_map[int(t)] for t in y_test])
+        all_pred_labels.extend([inv_label_map[int(p)] for p in y_pred])
+
+        run_time = time.time() - run_start
+        run_times.append(run_time)
+        print(f"Run {run+1} completed in {run_time:.2f} seconds")
+
+    # -------------------------------
+    # Final accuracy summary
+    # -------------------------------
+    mean_accuracies_run = np.mean(test_accuracies_run)
+    std_accuracies_run  = np.std(test_accuracies_run)
+    mean_train_run      = np.mean(train_accuracies_run)
+    std_train_run       = np.std(train_accuracies_run)
+
+    print("\n===== Final Test Performance over runs =====")
+    print("Testing accuracies over runs:", [f"{a:.4f}" for a in test_accuracies_run])
+    print(f"Average Test Accuracy: {mean_accuracies_run:.4f}")
+    print(f"Std Dev:               {std_accuracies_run:.4f}")
+
+    # use last run predictions only for the JSON trace output
+    y_pred = all_run_predictions[-1]
+
+    total_time = time.time() - overall_start
+    mean_run_time = np.mean(run_times)
+    std_run_time  = np.std(run_times)
+
+    print("\n===== Timing Summary =====")
+    print(f"Total compilation time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
+    print(f"Mean time per run: {mean_run_time:.2f} seconds")
+    print(f"Std Dev per run:   {std_run_time:.2f} seconds")
+
+    # -------------------------------
+    # Save run-level accuracy results
+    # -------------------------------
+    with open("results/decisiontree_acc.json", "w") as f:
+        json.dump({
+            "test_accuracies_per_run":  test_accuracies_run.tolist(),
+            "train_accuracies_per_run": train_accuracies_run.tolist(),
+            "mean_test_accuracy":  float(mean_accuracies_run),
+            "std_test_accuracy":   float(std_accuracies_run),
+            "mean_train_accuracy": float(mean_train_run),
+            "std_train_accuracy":  float(std_train_run)
+        }, f, indent=2)
+
+    # -------------------------------
+    # Metrics averaged over all runs
+    # -------------------------------
+    class_list     = ["goal_examples", "deadend_examples", "inc_examples"]
+    display_labels = [cls.replace("_examples", "") for cls in class_list]
+
+    precision_macro = precision_score(all_true_labels, all_pred_labels, average="macro", zero_division=0)
+    recall_macro    = recall_score(all_true_labels, all_pred_labels, average="macro", zero_division=0)
+    f1_macro        = f1_score(all_true_labels, all_pred_labels, average="macro", zero_division=0)
+
+    precision_per = precision_score(all_true_labels, all_pred_labels, average=None, labels=class_list, zero_division=0)
+    recall_per    = recall_score(all_true_labels, all_pred_labels, average=None, labels=class_list, zero_division=0)
+    f1_per        = f1_score(all_true_labels, all_pred_labels, average=None, labels=class_list, zero_division=0)
+
+    print("\n" + "="*60)
+    print("PRECISION / RECALL / F1  (averaged over all runs)")
+    print("="*60)
+    print(f"\n{'Class':<20}  {'Precision':>10}  {'Recall':>8}  {'F1':>8}")
+    print("-" * 52)
+    for cls, p, r, f in zip(display_labels, precision_per, recall_per, f1_per):
+        print(f"{cls:<20}  {p:>10.4f}  {r:>8.4f}  {f:>8.4f}")
+    print("-" * 52)
+    print(f"{'MACRO':<20}  {precision_macro:>10.4f}  {recall_macro:>8.4f}  {f1_macro:>8.4f}")
+
+    metrics_output = {
+        "overall_accuracy": float(mean_accuracies_run),
+        "total_test_examples": len(y_test),
+        "total_predictions_across_runs": len(all_pred_labels),
+        "macro": {
+            "precision": float(precision_macro),
+            "recall":    float(recall_macro),
+            "f1":        float(f1_macro)
+        },
+        "per_class_metrics": {
+            cls: {"precision": float(p), "recall": float(r), "f1": float(f)}
+            for cls, p, r, f in zip(class_list, precision_per, recall_per, f1_per)
+        }
+    }
+    with open("decisiontree_metrics.json", "w") as f:
+        json.dump(metrics_output, f, indent=2)
+    print("\nMetrics saved to decisiontree_metrics.json")
+
+    # -------------------------------
+    # Confusion matrices over all runs
+    # -------------------------------
+    np.set_printoptions(precision=2)
+    titles_options = [
+        ("Confusion matrix, without normalization", None),
+        ("Normalized confusion matrix", "true"),
+    ]
+    model_name = "DecisionTree"
+    for title, normalize in titles_options:
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        cm = confusion_matrix(
+            all_true_labels,
+            all_pred_labels,
+            labels=class_list
+        )
+        if normalize == "true":
+            cm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+
+        disp = ConfusionMatrixDisplay(
+            confusion_matrix=cm,
+            display_labels=display_labels
+        )
+        disp.plot(cmap=plt.cm.Blues, colorbar=False, ax=ax, values_format=".4f")
+        ax.set_title(f"{title} ({model_name}, averaged over {NUM_RUNS} runs)")
+        print(f"\n{title}")
+        print(cm)
+        filename_suffix = "normalized" if normalize else "raw"
+        plot_filename = f"confusion_matrix_{filename_suffix}_{model_name}.png"
+        plt.tight_layout()
+        plt.savefig(plot_filename, dpi=150)
+        plt.close()
+        print(f"Saved: {plot_filename}")
+
+    # -------------------------------
+    # Accuracy-across-runs plot
+    # -------------------------------
+    runs_axis = np.arange(1, NUM_RUNS + 1)
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(runs_axis, train_accuracies_run, label="Train Accuracy", color="green", marker="o")
+    plt.plot(runs_axis, test_accuracies_run, label="Test Accuracy", color="blue", marker="o")
+    plt.axhline(mean_accuracies_run, color="blue", linestyle="--", alpha=0.5,
+                label=f"Mean Test Acc = {mean_accuracies_run:.3f}")
+    plt.title("Decision Tree — Train vs Test Accuracy across Runs")
+    plt.xlabel("Run")
+    plt.ylabel("Accuracy")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("avg_test_accuracy_vs_runs_decisiontree.png", dpi=300)
+    plt.close()
+
+    # -------------------------------
+    # Tree structure & rule visualization (last run's tree)
+    # -------------------------------
+    # Reconstruct interpretable feature names: one per (timestep, request-type) cell,
+    # matching the flatten order used in encode_dataset (timestep-major).
+    feature_names = [f"t{t}_{req}" for t in range(max_timesteps) for req in mlb.classes_]
+
+    # max_depth below only limits how much of the tree is DRAWN (for readability).
+    # Set to None to render the full tree (can get very large/unreadable).
+    plot_depth = None
+
+    plt.figure(figsize=(20, 10))
+    plot_tree(
+        model,
+        feature_names=feature_names,
+        class_names=display_labels,
+        filled=True,
+        rounded=True,
+        fontsize=8,
+        max_depth=plot_depth
+    )
+    plt.title(f"Decision Tree structure (last run, showing top {plot_depth} levels)")
+    plt.tight_layout()
+    plt.savefig("decisiontree_structure_task1.png", dpi=150)
+    plt.close()
+    print("Saved: decisiontree_structure.png")
+
+    tree_rules = export_text(model, feature_names=feature_names)
+    with open("decisiontree_rules.txt", "w") as f:
+        f.write(tree_rules)
+    print(f"Saved: decisiontree_rules.txt  (full tree depth: {model.get_depth()}, leaves: {model.get_n_leaves()})")
