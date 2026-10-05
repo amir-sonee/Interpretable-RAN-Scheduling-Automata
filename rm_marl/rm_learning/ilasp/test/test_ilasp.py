@@ -44,13 +44,7 @@ if __name__ == "__main__":
     solution_arg = args.solution_filename
     # Convert to absolute path
     solution_path = os.path.abspath(solution_arg)
-    match = re.search(r"dst(\d+)", solution_path)
-    if not match:
-        raise ValueError(f"Could not extract dst number from {solution_path}")
 
-    dst_number = match.group(1)
-
-    # solution_path = os.path.join(PROJECT_ROOT, "results_RAN_dst118_test", args.solution_filename)
     learnt_automaton = parse_ilasp_solutions(solution_path)
     traces_per_class = {}
     true_labels = []
@@ -165,7 +159,7 @@ if __name__ == "__main__":
         print(cm)
 
         filename_suffix = "normalized" if normalize else "raw"
-        plot_filename = f"confusion_matrix_{filename_suffix}_dst{dst_number}_st6.png"
+        plot_filename = f"confusion_matrix.png"
         plt.tight_layout()
         plt.savefig(plot_filename, dpi=150)
         plt.close()
@@ -213,7 +207,7 @@ if __name__ == "__main__":
     test_result["Accuracy"] = [[test_accuracy]]
     test_result["Total test examples"] = [[total_traces]]
 
-    output_filename = f"test_result_dst{dst_number}_st6.json"
+    output_filename = f"test_result.json"
     utils.write_json_obj_pretty(test_result, output_filename)
 
     # ── Save confusion matrices + F1/precision/recall to a separate file ─────────
@@ -247,37 +241,16 @@ if __name__ == "__main__":
         }
     }
 
-    metrics_filename = f"metrics_dst{dst_number}_st6.json"
+    metrics_filename = f"metrics.json"
     utils.write_json_obj_pretty(metrics_output, metrics_filename)
     print(f"\nMetrics saved to {metrics_filename}")
-
-    # # Compute ratios
-    # for cls, stats in class_stats.items():
-    #     # total = sum(stats.values()
-    #     print(f"\nClass: {cls} has {total_cls[cls]} test examples where")
-    #     for metric, count in stats.items():
-    #         # print(f"Metric {metric} has {count} samples.")
-    #         if metric != "false_positive":
-    #             ratio = count / total_cls[cls] if total_cls[cls] > 0 else 0
-    #         else:
-    #             ratio = count / (total_traces - total_cls[cls]) if total_cls[cls] > 0 else 0
-                
-    #         ratio_stats[cls][metric] = ratio
-    #         print(f"  {metric}: {count} ({ratio:.2f})")
-    #         test_result[f"{metric}_{cls}"] = [[count, ratio]]
     
-    # test_accuracy = accuracy(true_labels, pred_labels)
-    # test_result["Accuracy"] = []
-    # test_result["Total test examples"] = []
-    # test_result["Accuracy"].append([test_accuracy])
-    # test_result["Total test examples"].append([total_traces])
-    
-    output_filename = f"test_result_dst{dst_number}_st6.json"
+    output_filename = f"test_result.json"
     utils.write_json_obj_pretty(test_result, output_filename)
 
     output_data = {
     cls: entries
     for cls, entries in false_entries.items()
     }
-    false_neg_filename = f"false_negatives_test_result_dst{dst_number}_st6.json"
+    false_neg_filename = f"false_negatives_test_result.json"
     utils.write_json_obj_pretty(output_data, false_neg_filename)
